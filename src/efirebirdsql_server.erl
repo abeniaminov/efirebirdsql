@@ -11,6 +11,30 @@
 
 -include("efirebirdsql.hrl").
 
+-define(version1        ,  1).
+-define(version3        ,  3).
+-define(consistency     ,  1).
+-define(concurrency     ,  2).
+-define(shared          ,  3).
+-define(protected       ,  4).
+-define(exclusive       ,  5).
+-define(wait            ,  6).
+-define(nowait          ,  7).
+-define(read            ,  8).
+-define(write           ,  9).
+-define(lock_read       , 10).
+-define(lock_write      , 11).
+-define(verb_time       , 12).
+-define(commit_time     , 13).
+-define(ignore_limbo    , 14).
+-define(read_committed  , 15).
+-define(autocommit      , 16).
+-define(rec_version     , 17).
+-define(no_rec_version  , 18).
+-define(restart_requests, 19).
+-define(no_auto_undo    , 20).
+-define(lock_timeout    , 21).
+
 -record(state, {mod,
                 sock,
                 public_key,
@@ -55,11 +79,12 @@ connect(Mod, Host, Username, Password, Database, IsCreateDB, PageSize, State) ->
         efirebirdsql_op:op_connect(Host, Username, Password, Database, State#state.public_key, State#state.wire_crypt)),
     case efirebirdsql_op:get_response(Mod, Sock) of
         {op_accept, _} ->
+            R =
             case IsCreateDB of
                 true ->
-                    R = create_database(Mod, Sock, Username, Password, Database, PageSize);
+                    create_database(Mod, Sock, Username, Password, Database, PageSize);
                 false ->
-                    R = attach_database(Mod, Sock, Username, Password, Database)
+                    attach_database(Mod, Sock, Username, Password, Database)
             end,
             case R of
                 {ok, DbHandle} ->
@@ -175,7 +200,7 @@ handle_call({connect, Host, Username, Password, Database, Options}, _From, State
     SockOptions = [{active, false}, {packet, raw}, binary],
     Port = proplists:get_value(port, Options, 3050),
     IsCreateDB = proplists:get_value(createdb, Options, false),
-    PageSize = proplists:get_value(pagesize, Options, 4096),
+    PageSize = proplists:get_value(pagesize, Options, 8192),
     {Pub ,Private} = efirebirdsql_srp:client_seed(),
     case gen_tcp:connect(Host, Port, SockOptions) of
         {ok, Sock} ->
@@ -190,13 +215,22 @@ handle_call({connect, Host, Username, Password, Database, Options}, _From, State
         Error = {error, _} ->
             {reply, Error, State}
     end;
+
+
+
+
 handle_call({transaction, Options}, _From, State) ->
-    AutoCommit = proplists:get_value(auto_commit, Options, true),
+    AutoCommit = iif(proplists:get_value(auto_commit, Options, true), [?autocommit], []),
+    ReadOnly = iif(proplists:get_value(read_only, Options, false),[?read], [?write]),
+    Wait = iif(proplists:get_value(wait, Options, true), [?wait], [?nowait]),
+    RecordVersion = iif(proplists:get_value(record_version, Options, false), [?rec_version], [?no_rec_version]),
+    ReadCommitted = iif(proplists:get_value(read_committed, Options, true), [?read_committed], [?concurrency]),
+
     %% isc_tpb_version3,isc_tpb_write,isc_tpb_wait,isc_tpb_read_committed,isc_tpb_no_rec_version
-    Tpb = [3, 9, 6, 15, 18],
+
     R = begin_transaction(State#state.mod,
         State#state.sock, State#state.db_handle,
-        lists:flatten(Tpb, if AutoCommit =:= true -> [16]; true -> [] end)),
+        lists:flatten([[3], AutoCommit, ReadOnly, Wait, RecordVersion, ReadCommitted])),
     case R of
         {ok, TransHandle} ->
             {reply, ok, State#state{trans_handle=TransHandle}};
@@ -213,12 +247,12 @@ handle_call(detach, _From, State) ->
     {reply, detach(State#state.mod,
         State#state.sock, State#state.db_handle), State};
 handle_call({prepare, Sql}, _From, State) ->
-    case R = prepare_statement(State#state.mod, State#state.sock,
+    case prepare_statement(State#state.mod, State#state.sock,
                 State#state.trans_handle, State#state.stmt_handle, Sql) of
         {ok, StmtType, XSqlVars} ->
             {reply, ok, State#state{stmt_type=StmtType, xsqlvars=XSqlVars}};
-        {error, _Reason} ->
-            {reply, R, State}
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
     end;
 handle_call({execute, Params}, _From, State) ->
     case State#state.stmt_type of
@@ -279,3 +313,10 @@ terminate(_Reason, _State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+
+iif(Pred, V1, V2) ->
+    case Pred of
+        true -> V1;
+        false -> V2
+    end.
